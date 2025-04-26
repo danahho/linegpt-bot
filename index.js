@@ -1,49 +1,57 @@
-require('dotenv').config();
-const express = require('express');
-const axios = require('axios');
-const app = express();
+import express from 'express';
+import axios from 'axios';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
+const app = express();
 app.use(express.json());
 
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
+
   for (const event of events) {
     if (event.type === 'message' && event.message.type === 'text') {
+      const userId = event.source.userId;
       const userMessage = event.message.text;
+
+      // 1. 先馬上回覆思考中
+      await replyToLine(event.replyToken, "思考中，請稍等喔...");
+
+      // 2. 啟動Gemini產生回答
       const reply = await askGemini(userMessage);
-      await replyToLine(event.replyToken, reply);
+
+      // 3. 完成後push正式回答
+      await pushMessage(userId, reply);
     }
   }
+
   res.send('OK');
 });
 
 async function askGemini(message) {
   try {
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        contents: [
-          {
-            parts: [{ text: message }]
-          }
-        ]
-      }
-    );
-    return response.data.candidates[0].content.parts[0].text.trim();
+    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    const result = await model.generateContent(message);
+    const response = await result.response;
+    const text = response.text();
+    return text;
   } catch (error) {
-    console.error(error.response?.data || error.message);
-    return '抱歉，我無法回應。';
+    console.error(error);
+    return "抱歉，我現在無法回應。";
   }
 }
 
 async function replyToLine(replyToken, message) {
   try {
     await axios.post('https://api.line.me/v2/bot/message/reply', {
-      replyToken: replyToken,
-      messages: [{ type: 'text', text: message }]
+      replyToken,
+      messages: [{
+        type: 'text',
+        text: message,
+      }]
     }, {
       headers: {
         'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`,
@@ -51,7 +59,26 @@ async function replyToLine(replyToken, message) {
       }
     });
   } catch (error) {
-    console.error(error.response?.data || error.message);
+    console.error(error);
+  }
+}
+
+async function pushMessage(to, message) {
+  try {
+    await axios.post('https://api.line.me/v2/bot/message/push', {
+      to,
+      messages: [{
+        type: 'text',
+        text: message,
+      }]
+    }, {
+      headers: {
+        'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+  } catch (error) {
+    console.error(error);
   }
 }
 
