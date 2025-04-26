@@ -1,7 +1,7 @@
 {
+  "type": "module",
   "name": "linegpt-bot",
   "version": "1.0.0",
-  "description": "LINE bot connected to Gemini API via Railway",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
