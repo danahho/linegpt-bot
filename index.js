@@ -8,6 +8,8 @@ app.use(express.json());
 
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const BOT_NAME = '@阿和智慧助理V1'; // <-- 把這裡換成你的 Bot 顯示名稱
+
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 app.post('/webhook', async (req, res) => {
@@ -19,20 +21,18 @@ app.post('/webhook', async (req, res) => {
       const sourceType = event.source.type;
       const userId = event.source.userId;
 
-      // 一對一私訊，直接回應
+      // 一對一私訊直接回應
       if (sourceType === 'user') {
         await replyToLine(event.replyToken, "思考中，請稍等喔...");
         const reply = await askGemini(userMessage);
         await pushMessage(userId, reply);
       }
 
-      // 群組或聊天室，只有被@而且有內容才回應
+      // 群組或聊天室，要標記Bot名字才回應
       if (sourceType === 'group' || sourceType === 'room') {
-        const mentioned = event.message.mentioned && event.message.mentioned.mentions && event.message.mentioned.mentions.length > 0;
-
-        if (mentioned) {
-          // 去掉 @名字，留下真正的訊息
-          const cleanedText = userMessage.replace(/@[^\s]+/g, '').trim();
+        const isMentionedByText = userMessage.includes(BOT_NAME);
+        if (isMentionedByText) {
+          const cleanedText = userMessage.replace(BOT_NAME, '').trim();
 
           if (cleanedText !== '') {
             await replyToLine(event.replyToken, "思考中，請稍等喔...");
