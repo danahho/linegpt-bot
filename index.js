@@ -1,4 +1,5 @@
-// index.js
+// 正確版 index.js 群組回群組，私訊回私訊！
+
 import express from 'express';
 import axios from 'axios';
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -8,7 +9,7 @@ app.use(express.json());
 
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const BOT_NAME = '@阿和智慧助理V1'; // <-- 把這裡換成你的 Bot 顯示名稱
+const BOT_NAME = '@阿和智慧助理V1'; // 你的Bot名字（群組裡顯示的）
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
@@ -20,15 +21,19 @@ app.post('/webhook', async (req, res) => {
       const userMessage = event.message.text;
       const sourceType = event.source.type;
       const userId = event.source.userId;
+      const groupId = event.source.groupId;
+
+      // 決定要回給誰
+      const replyTarget = (sourceType === 'group' || sourceType === 'room') ? groupId : userId;
 
       // 一對一私訊直接回應
       if (sourceType === 'user') {
         await replyToLine(event.replyToken, "思考中，請稍等喔...");
         const reply = await askGemini(userMessage);
-        await pushMessage(userId, reply);
+        await pushMessage(replyTarget, reply);
       }
 
-      // 群組或聊天室，要標記Bot名字才回應
+      // 群組或聊天室，需要標記Bot名字且有內容才回應
       if (sourceType === 'group' || sourceType === 'room') {
         const isMentionedByText = userMessage.includes(BOT_NAME);
         if (isMentionedByText) {
@@ -37,7 +42,7 @@ app.post('/webhook', async (req, res) => {
           if (cleanedText !== '') {
             await replyToLine(event.replyToken, "思考中，請稍等喔...");
             const reply = await askGemini(cleanedText);
-            await pushMessage(userId, reply);
+            await pushMessage(replyTarget, reply);
           }
         }
       }
@@ -94,7 +99,7 @@ async function pushMessage(to, message) {
       }
     });
   } catch (error) {
-    console.error(error);
+    console.error(error.response?.data || error.message);
   }
 }
 
