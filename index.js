@@ -1,3 +1,4 @@
+// index.js
 import express from 'express';
 import axios from 'axios';
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -18,18 +19,26 @@ app.post('/webhook', async (req, res) => {
       const sourceType = event.source.type;
       const userId = event.source.userId;
 
+      // 一對一私訊，直接回應
       if (sourceType === 'user') {
         await replyToLine(event.replyToken, "思考中，請稍等喔...");
         const reply = await askGemini(userMessage);
         await pushMessage(userId, reply);
       }
 
+      // 群組或聊天室，只有被@而且有內容才回應
       if (sourceType === 'group' || sourceType === 'room') {
         const mentioned = event.message.mentioned && event.message.mentioned.mentions && event.message.mentioned.mentions.length > 0;
+
         if (mentioned) {
-          await replyToLine(event.replyToken, "思考中，請稍等喔...");
-          const reply = await askGemini(userMessage);
-          await pushMessage(userId, reply);
+          // 去掉 @名字，留下真正的訊息
+          const cleanedText = userMessage.replace(/@[^\s]+/g, '').trim();
+
+          if (cleanedText !== '') {
+            await replyToLine(event.replyToken, "思考中，請稍等喔...");
+            const reply = await askGemini(cleanedText);
+            await pushMessage(userId, reply);
+          }
         }
       }
     }
@@ -43,7 +52,8 @@ async function askGemini(message) {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
     const result = await model.generateContent(message);
     const response = await result.response;
-    return response.text();
+    const text = response.text();
+    return text;
   } catch (error) {
     console.error(error);
     return "抱歉，我現在無法回應。";
