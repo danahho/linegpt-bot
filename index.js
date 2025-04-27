@@ -1,4 +1,4 @@
-// 最終版：雙向記憶＋群組5則、個人10則＋自動過期清理版 index.js
+// 最終版：修正群組標記 @Bot 正確回應版 index.js
 
 import express from 'express';
 import axios from 'axios';
@@ -10,26 +10,26 @@ app.use(express.json());
 
 const CHANNEL_ACCESS_TOKEN = process.env.CHANNEL_ACCESS_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const BOT_USER_ID = process.env.BOT_USER_ID; // ✅ 新增 Bot自己的UserID
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 const MEMORY_FILE = './memory.json';
 
-// 記憶格式 { id: "userId or groupId", history: [{ role, parts, timestamp }] }
 let memoryStore = {};
 
-// 輔助：讀取記憶
+const GROUP_MEMORY_LIMIT = 5;
+const USER_MEMORY_LIMIT = 10;
+
 function loadMemory() {
   if (fs.existsSync(MEMORY_FILE)) {
     memoryStore = JSON.parse(fs.readFileSync(MEMORY_FILE));
   }
 }
 
-// 輔助：儲存記憶
 function saveMemory() {
   fs.writeFileSync(MEMORY_FILE, JSON.stringify(memoryStore, null, 2));
 }
 
-// 輔助：清除過期（24小時）
 function cleanOldMessages(id) {
   const now = Date.now();
   if (memoryStore[id]) {
@@ -37,7 +37,6 @@ function cleanOldMessages(id) {
   }
 }
 
-// 輔助：限制最大筆數
 function limitHistorySize(id, limit) {
   if (memoryStore[id] && memoryStore[id].history.length > limit) {
     memoryStore[id].history = memoryStore[id].history.slice(-limit);
@@ -58,7 +57,7 @@ app.post('/webhook', async (req, res) => {
 
       const id = sourceType === 'user' ? userId : groupId;
       const isGroup = sourceType === 'group' || sourceType === 'room';
-      const maxHistory = isGroup ? 5 : 10;
+      const maxHistory = isGroup ? GROUP_MEMORY_LIMIT : USER_MEMORY_LIMIT;
 
       if (!memoryStore[id]) {
         memoryStore[id] = { history: [] };
@@ -76,7 +75,7 @@ app.post('/webhook', async (req, res) => {
       limitHistorySize(id, maxHistory);
       saveMemory();
 
-      const mentioned = event.message.mentioned?.mentions?.some(m => m.type === 'user' && m.userId);
+      const mentioned = event.message.mentioned?.mentions?.some(m => m.userId === BOT_USER_ID);
 
       if (sourceType === 'user' || (isGroup && mentioned)) {
         const reply = await askGemini(id);
