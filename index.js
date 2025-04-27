@@ -17,8 +17,12 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const BOT_USER_ID = process.env.BOT_USER_ID;
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// 輕量記憶體
-const memory = {};  // RAM 記憶體
+const memoryFile = path.resolve('memory.json');
+let memory = fs.existsSync(memoryFile) ? JSON.parse(fs.readFileSync(memoryFile)) : {};
+
+function saveMemory() {
+  fs.writeFileSync(memoryFile, JSON.stringify(memory));
+}
 
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
@@ -27,59 +31,62 @@ app.post('/webhook', async (req, res) => {
     if (event.type === 'message' && event.message.type === 'text') {
       const sourceType = event.source.type;
       const userId = sourceType === 'user' ? event.source.userId : (event.source.groupId || event.source.roomId);
-      const userMessage = event.message.text.trim();
+      let userMessage = event.message.text.trim();
 
       if (!memory[userId]) memory[userId] = [];
 
-      // 把使用者的訊息記錄起來
-      memory[userId].push({ role: 'user', text: userMessage });
-      if (memory[userId].length > (sourceType === 'user' ? 10 : 5)) memory[userId].shift();
+      // 群組標記檢查
+      if (sourceType === 'group' || sourceType === 'room') {
+        const mentionedUsers = event.message.mentioned?.mentions || [];
+        const mentionedIds = mentionedUsers.map(u => u.userId);
 
-      let shouldRespond = false;
-
-      if (sourceType === 'user') {
-        shouldRespond = true;
-      } else if (sourceType === 'group' || sourceType === 'room') {
-        if (userMessage.includes(BOT_USER_ID) || userMessage.includes('@阿和智慧助理V1')) {
-          shouldRespond = true;
+        if (!mentionedIds.includes(BOT_USER_ID)) {
+          continue; // 沒有標記到Bot，不回應
         }
+        userMessage = userMessage.replace(/@[^\s]+/g, '').trim();
       }
 
-      if (shouldRespond) {
-        await replyToLine(event.replyToken, '思考中... 🤔');
-        const reply = await askGemini(memory[userId]);
-        memory[userId].push({ role: 'model', text: reply });
-        await pushMessage(userId, reply);
+      memory[userId].push({ role: 'user', content: userMessage });
+
+      // 限制記憶數量
+      const maxMemory = sourceType === 'user' ? 10 : 5;
+      if (memory[userId].length > maxMemory * 2) { // *2 因為一問一答
+        memory[userId] = memory[userId].slice(-maxMemory * 2);
       }
+
+      const reply = await askGemini(memory[userId]);
+      memory[userId].push({ role: 'assistant', content: reply });
+      saveMemory();
+
+      await replyToLine(event.replyToken, reply);
     }
   }
 
   res.send('OK');
 });
 
-async function askGemini(history) {
+async function askGemini(context) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
     const chatHistory = [];
     let expectRole = 'user';
 
-    for (const item of history) {
-      if (item.role === expectRole) {
-        chatHistory.push({ role: item.role, parts: [{ text: item.text }] });
-        expectRole = expectRole === 'user' ? 'model' : 'user';
+    for (const msg of context) {
+      if (msg.role === expectRole) {
+        chatHistory.push({ role: msg.role, parts: [{ text: msg.content }] });
+        expectRole = (expectRole === 'user') ? 'model' : 'user';
       }
     }
 
     const chat = model.startChat({ history: chatHistory });
-    const lastUserInput = history.filter(h => h.role === 'user').slice(-1)[0]?.text || '你好';
-    const result = await chat.sendMessage(lastUserInput);
-    const text = result.response.text();
+    const latestUserMessage = context.filter(c => c.role === 'user').slice(-1)[0].content;
+    const result = await chat.sendMessage(latestUserMessage);
+    return result.response.text();
 
-    return text;
   } catch (error) {
     console.error(error);
-    return "抱歉，我現在無法回應。🥺";
+    return "抱歉，我現在無法回應。";
   }
 }
 
@@ -95,23 +102,7 @@ async function replyToLine(replyToken, message) {
       }
     });
   } catch (error) {
-    console.error('Reply error:', error);
-  }
-}
-
-async function pushMessage(to, message) {
-  try {
-    await axios.post('https://api.line.me/v2/bot/message/push', {
-      to,
-      messages: [{ type: 'text', text: message }]
-    }, {
-      headers: {
-        'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-  } catch (error) {
-    console.error('Push error:', error);
+    console.error(error);
   }
 }
 
