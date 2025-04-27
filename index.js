@@ -17,40 +17,29 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const BOT_USER_ID = process.env.BOT_USER_ID;
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
+// 記憶體檔案
 const memoryFile = path.resolve('memory.json');
-let memory = {};
+let memory = fs.existsSync(memoryFile) ? JSON.parse(fs.readFileSync(memoryFile)) : {};
 
-// 讀取記憶並清除過期﻿
-function loadMemory() {
-  if (fs.existsSync(memoryFile)) {
-    memory = JSON.parse(fs.readFileSync(memoryFile));
-    const now = Date.now();
-    const expireDuration = 24 * 60 * 60 * 1000;
+// 記憶保存時間（毫秒），這裡設 24 小時
+const MEMORY_LIFESPAN = 24 * 60 * 60 * 1000;
 
-    for (const userId in memory) {
-      if (memory[userId].timestamp && now - memory[userId].timestamp > expireDuration) {
-        delete memory[userId];
-      }
-    }
-  }
-}
-
-// 存檔
 function saveMemory() {
   fs.writeFileSync(memoryFile, JSON.stringify(memory));
 }
 
-// 更新記憶
-function updateMemory(userId, newMemoryArray) {
-  memory[userId] = {
-    data: newMemoryArray,
-    timestamp: Date.now(),
-  };
-  saveMemory();
+function cleanOldMemory(userId) {
+  const now = Date.now();
+  if (!memory[userId]) return;
+  memory[userId] = memory[userId].filter(m => now - m.timestamp < MEMORY_LIFESPAN);
 }
 
-// 啟動時先讀記憶
-loadMemory();
+function pushMemory(userId, role, text) {
+  if (!memory[userId]) memory[userId] = [];
+  memory[userId].push({ role, text, timestamp: Date.now() });
+  const limit = userId.startsWith('U') ? 10 : 5; // 一對一 10 則，群組 5 則
+  if (memory[userId].length > limit) memory[userId].shift();
+}
 
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
@@ -61,18 +50,13 @@ app.post('/webhook', async (req, res) => {
       const userId = sourceType === 'user' ? event.source.userId : (event.source.groupId || event.source.roomId);
       const userMessage = event.message.text.trim();
 
-      let currentMemory = memory[userId]?.data || [];
-      
-      // 對話內容
+      cleanOldMemory(userId);
+
       if (sourceType === 'user') {
-        currentMemory.push({ role: 'user', content: userMessage });
-        if (currentMemory.length > 10) currentMemory.shift();
-
-        const reply = await askGemini(currentMemory);
-        currentMemory.push({ role: 'assistant', content: reply });
-
+        pushMemory(userId, 'user', userMessage);
+        const reply = await askGemini(userId);
+        pushMemory(userId, 'model', reply);
         await replyToLine(event.replyToken, reply);
-        updateMemory(userId, currentMemory);
       }
 
       if (sourceType === 'group' || sourceType === 'room') {
@@ -81,47 +65,45 @@ app.post('/webhook', async (req, res) => {
 
         if (mentionedIds.includes(BOT_USER_ID)) {
           const cleanedMessage = userMessage.replace(/<@[^>]+>/g, '').trim();
-          currentMemory.push({ role: 'user', content: cleanedMessage });
-          if (currentMemory.length > 5) currentMemory.shift();
-
-          const reply = await askGemini(currentMemory);
-          currentMemory.push({ role: 'assistant', content: reply });
-
+          pushMemory(userId, 'user', cleanedMessage);
+          const reply = await askGemini(userId);
+          pushMemory(userId, 'model', reply);
           await replyToLine(event.replyToken, reply);
-          updateMemory(userId, currentMemory);
         }
       }
+
+      saveMemory();
     }
   }
 
   res.send('OK');
 });
 
-async function askGemini(history) {
+async function askGemini(userId) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+    const history = memory[userId] || [];
 
+    // 整理對話輪流順序
     const chatHistory = [];
-    let expectRole = "user";
-
-    for (const item of history) {
-      if (item.role === expectRole) {
-        chatHistory.push({ role: item.role, parts: [{ text: item.content }] });
-        expectRole = expectRole === "user" ? "model" : "user";
+    let expectedRole = 'user';
+    for (const m of history) {
+      if (m.role === expectedRole) {
+        chatHistory.push({ role: m.role, parts: [{ text: m.text }] });
+        expectedRole = (expectedRole === 'user') ? 'model' : 'user';
       }
     }
 
-    const lastUserMessage = history.filter(m => m.role === 'user').slice(-1)[0]?.content || "";
-    chatHistory.push({ role: 'user', parts: [{ text: lastUserMessage }] });
+    if (chatHistory.length === 0 || chatHistory[chatHistory.length - 1].role !== 'user') {
+      throw new Error('No valid user message to send.');
+    }
 
-    const chat = model.startChat({ history: chatHistory });
-    const result = await chat.sendMessage(lastUserMessage);
-    const text = result.response.text();
-
-    return text + ' 🚀'; // 加上emoji
+    const chat = model.startChat({ history: chatHistory.slice(0, -1) });
+    const result = await chat.sendMessage(chatHistory[chatHistory.length - 1].parts[0].text);
+    return result.response.text();
   } catch (error) {
     console.error(error);
-    return "抱歉，我現在無法回應。🤖";
+    return "抱歉，我現在無法回應。";
   }
 }
 
@@ -129,7 +111,10 @@ async function replyToLine(replyToken, message) {
   try {
     await axios.post('https://api.line.me/v2/bot/message/reply', {
       replyToken,
-      messages: [{ type: 'text', text: message }]
+      messages: [{
+        type: 'text',
+        text: message + ' \uD83D\uDE80' // 加上火箭表情 🚀
+      }]
     }, {
       headers: {
         'Authorization': `Bearer ${CHANNEL_ACCESS_TOKEN}`,
