@@ -17,9 +17,11 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const BOT_USER_ID = process.env.BOT_USER_ID;
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// 軟軟的記憶，最多10則
 const memoryFile = path.resolve('memory.json');
-let memory = fs.existsSync(memoryFile) ? JSON.parse(fs.readFileSync(memoryFile)) : {};
+let memory = {};
+if (fs.existsSync(memoryFile)) {
+  memory = JSON.parse(fs.readFileSync(memoryFile));
+}
 
 function saveMemory() {
   fs.writeFileSync(memoryFile, JSON.stringify(memory));
@@ -36,63 +38,54 @@ app.post('/webhook', async (req, res) => {
 
       if (!memory[userId]) memory[userId] = [];
 
-      if (sourceType === 'user') {
-        const reply = await askGemini(userId, userMessage);
-        await replyToLine(event.replyToken, reply);
-      }
-
+      // 群組必須標記機器人才回應
       if (sourceType === 'group' || sourceType === 'room') {
-        const mentionedUsers = event.message.mentioned?.mentions || [];
-        const mentionedIds = mentionedUsers.map(u => u.userId);
-
-        if (mentionedIds.includes(BOT_USER_ID)) {
-          userMessage = userMessage.replace(/<@[^>]+>/g, '').trim();
-          const reply = await askGemini(userId, userMessage);
-          await replyToLine(event.replyToken, reply);
+        const mentions = event.message.mentioned?.mentions || [];
+        const mentionedIds = mentions.map(u => u.userId);
+        if (!mentionedIds.includes(BOT_USER_ID)) {
+          continue;
         }
+        userMessage = userMessage.replace(/@[^\s]+/g, '').trim();
       }
+
+      memory[userId].push({ role: 'user', text: userMessage });
+
+      if (memory[userId].length > (sourceType === 'user' ? 10 : 5)) {
+        memory[userId].shift();
+      }
+
+      const reply = await askGemini(userId);
+      memory[userId].push({ role: 'model', text: reply });
+      await replyToLine(event.replyToken, reply);
+      saveMemory();
     }
   }
+
   res.send('OK');
 });
 
-async function askGemini(userId, userMessage) {
+async function askGemini(userId) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
     const history = memory[userId] || [];
+
     const chatHistory = [];
-    let expectRole = "user";
+    let expect = 'user';
 
     for (const item of history) {
-      if (item.role === expectRole) {
-        chatHistory.push({ role: item.role, parts: [{ text: item.content }] });
-        expectRole = (expectRole === "user") ? "model" : "user";
+      if (item.role === expect) {
+        chatHistory.push({ role: item.role, parts: [{ text: item.text }] });
+        expect = expect === 'user' ? 'model' : 'user';
       }
     }
 
-    chatHistory.push({ role: "user", parts: [{ text: userMessage }] });
-
     const chat = model.startChat({ history: chatHistory });
-    const result = await chat.sendMessage(userMessage);
-    const text = result.response.text();
-
-    if (!memory[userId]) memory[userId] = [];
-
-    memory[userId].push({ role: "user", content: userMessage });
-    memory[userId].push({ role: "assistant", content: text });
-
-    if (memory[userId].length > (userId.startsWith('U') ? 10 : 5)) {
-      memory[userId].shift();
-      memory[userId].shift(); // 一個問答一起刪
-    }
-
-    saveMemory();
-
-    return text;
+    const lastUserMessage = history.filter(m => m.role === 'user').slice(-1)[0]?.text || '';
+    const result = await chat.sendMessage(lastUserMessage);
+    return result.response.text();
   } catch (error) {
     console.error(error);
-    return "🚗 抱歉，我現在無法回應，等我接下一班！";
+    return '抱歉，現在無法回應。';
   }
 }
 
