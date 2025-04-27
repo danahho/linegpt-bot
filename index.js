@@ -31,37 +31,38 @@ app.post('/webhook', async (req, res) => {
     if (event.type === 'message' && event.message.type === 'text') {
       const sourceType = event.source.type;
       const userId = sourceType === 'user' ? event.source.userId : (event.source.groupId || event.source.roomId);
-      let userMessage = event.message.text.trim();
+      const userMessage = event.message.text.trim();
 
       if (!memory[userId]) memory[userId] = [];
+      memory[userId].push({ role: 'user', content: userMessage });
 
-      // 群組標記檢查
+      if (memory[userId].length > (sourceType === 'user' ? 10 : 5)) {
+        memory[userId].shift();
+      }
+
+      if (sourceType === 'user') {
+        const reply = await askGemini(memory[userId]);
+        memory[userId].push({ role: 'assistant', content: reply });
+        await replyToLine(event.replyToken, reply);
+        saveMemory();
+      }
+
       if (sourceType === 'group' || sourceType === 'room') {
         const mentionedUsers = event.message.mentioned?.mentions || [];
         const mentionedIds = mentionedUsers.map(u => u.userId);
+        const botMentioned = mentionedIds.includes(BOT_USER_ID) || event.message.text.includes('@阿和智慧助理V1');
 
-        if (!mentionedIds.includes(BOT_USER_ID)) {
-          continue; // 沒有標記到Bot，不回應
+        if (botMentioned) {
+          const cleanedMessage = event.message.text.replace(/<@[^>]+>/g, '').replace('@阿和智慧助理V1', '').trim();
+          memory[userId].push({ role: 'user', content: cleanedMessage });
+          const reply = await askGemini(memory[userId]);
+          memory[userId].push({ role: 'assistant', content: reply });
+          await replyToLine(event.replyToken, reply);
+          saveMemory();
         }
-        userMessage = userMessage.replace(/@[^\s]+/g, '').trim();
       }
-
-      memory[userId].push({ role: 'user', content: userMessage });
-
-      // 限制記憶數量
-      const maxMemory = sourceType === 'user' ? 10 : 5;
-      if (memory[userId].length > maxMemory * 2) { // *2 因為一問一答
-        memory[userId] = memory[userId].slice(-maxMemory * 2);
-      }
-
-      const reply = await askGemini(memory[userId]);
-      memory[userId].push({ role: 'assistant', content: reply });
-      saveMemory();
-
-      await replyToLine(event.replyToken, reply);
     }
   }
-
   res.send('OK');
 });
 
