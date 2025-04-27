@@ -1,9 +1,12 @@
-// index.js 修正記憶存取 + 格式正確版
-
+// index.js 修正版
 import express from 'express';
 import axios from 'axios';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import fs from 'fs';
+import path from 'path';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const app = express();
 app.use(express.json());
@@ -13,69 +16,51 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const BOT_USER_ID = process.env.BOT_USER_ID;
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-// 簡單記憶體 (最多10條個人/5條群組)
-let memory = {};
+const MEMORY_FILE = './memory.json';
+const memory = fs.existsSync(MEMORY_FILE) ? JSON.parse(fs.readFileSync(MEMORY_FILE)) : {};
 
 function saveMemory() {
-  try {
-    fs.writeFileSync('./memory.json', JSON.stringify(memory));
-  } catch (err) {
-    console.error('Save memory error:', err);
-  }
-}
-
-function loadMemory() {
-  try {
-    if (fs.existsSync('./memory.json')) {
-      memory = JSON.parse(fs.readFileSync('./memory.json'));
-    }
-  } catch (err) {
-    console.error('Load memory error:', err);
-  }
-}
-
-loadMemory();
-
-function addMemory(sourceId, sender, role, text) {
-  if (!memory[sourceId]) memory[sourceId] = [];
-  memory[sourceId].push({ sender, role, text });
-  const limit = sender === 'user' ? 10 : 5;
-  if (memory[sourceId].length > limit) {
-    memory[sourceId].shift();
-  }
-  saveMemory();
+  fs.writeFileSync(MEMORY_FILE, JSON.stringify(memory));
 }
 
 app.post('/webhook', async (req, res) => {
   const events = req.body.events;
 
   for (const event of events) {
-    if (event.type === 'message' && event.message.type === 'text') {
-      const userMessage = event.message.text;
+    if (event.type === 'message' && (event.message.type === 'text' || event.message.type === 'image')) {
+      const userMessage = event.message.text || '[圖片訊息]';
       const sourceType = event.source.type;
       const sourceId = sourceType === 'user' ? event.source.userId : event.source.groupId || event.source.roomId;
-      const mentioned = event.message.mentioned && event.message.mentioned.mentions && event.message.mentioned.mentions.length > 0;
-      const isMentioned = event.message.mentioned?.mentions?.some(m => m.userId === BOT_USER_ID);
 
-      // 加入使用者提問到記憶
-      addMemory(sourceId, 'user', 'user', userMessage);
+      // 初始化記憶
+      if (!memory[sourceId]) memory[sourceId] = [];
 
-      let shouldReply = false;
-      if (sourceType === 'user') {
-        shouldReply = true;
-      } else if ((sourceType === 'group' || sourceType === 'room') && isMentioned) {
-        shouldReply = true;
+      // 記錄用戶說的話
+      memory[sourceId].push({ role: 'user', parts: [{ text: userMessage }] });
+
+      // 保持記憶量（群組最多5則，個人最多10則）
+      const maxMemory = sourceType === 'user' ? 10 : 5;
+      if (memory[sourceId].length > maxMemory * 2) {
+        memory[sourceId] = memory[sourceId].slice(-maxMemory * 2);
       }
 
-      if (shouldReply) {
-        const reply = await askGemini(sourceId);
+      saveMemory();
+
+      let mentioned = false;
+      if (sourceType === 'group' || sourceType === 'room') {
+        mentioned = event.message.mentioned && event.message.mentioned.mentions.some(m => m.userId === BOT_USER_ID);
+      }
+
+      if (sourceType === 'user' || mentioned) {
+        const reply = await askGemini(memory[sourceId]);
+        memory[sourceId].push({ role: 'model', parts: [{ text: reply }] });
+        saveMemory();
+
         if (sourceType === 'user') {
           await replyToLine(event.replyToken, reply);
-        } else {
+        } else if (sourceType === 'group' || sourceType === 'room') {
           await replyToLine(event.replyToken, reply);
         }
-        // 加入自己的回答到記憶
-        addMemory(sourceId, 'bot', 'model', reply);
       }
     }
   }
@@ -83,21 +68,29 @@ app.post('/webhook', async (req, res) => {
   res.send('OK');
 });
 
-async function askGemini(sourceId) {
+async function askGemini(history) {
   try {
+    const messages = cleanHistory(history);
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-    const chat = model.startChat({
-      history: memory[sourceId]?.map(m => ({ role: m.role, parts: [{ text: m.text }] })) || [],
-      generationConfig: {
-        temperature: 0.7,
-      },
-    });
-    const result = await chat.sendMessage(memory[sourceId]?.slice(-1)[0]?.text || '你好');
-    return result.response.text();
+    const chat = await model.startChat({ history: messages });
+    const result = await chat.sendMessage(messages[messages.length - 1].parts[0].text);
+    const response = await result.response;
+    return response.text();
   } catch (error) {
     console.error(error);
-    return "抱歉，現在無法回答。";
+    return "抱歉，目前無法回答，請稍後再試。";
   }
+}
+
+function cleanHistory(hist) {
+  const fixed = [];
+  for (let i = 0; i < hist.length; i++) {
+    fixed.push(hist[i]);
+    if (hist[i].role === 'user' && (i + 1 === hist.length || hist[i + 1].role === 'user')) {
+      fixed.push({ role: 'model', parts: [{ text: '...' }] });
+    }
+  }
+  return fixed;
 }
 
 async function replyToLine(replyToken, message) {
@@ -115,7 +108,7 @@ async function replyToLine(replyToken, message) {
       }
     });
   } catch (error) {
-    console.error('Reply error:', error);
+    console.error(error);
   }
 }
 
