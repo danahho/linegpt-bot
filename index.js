@@ -68,17 +68,41 @@ app.post('/webhook', async (req, res) => {
   res.send('OK');
 });
 
-async function askGemini(history) {
+async function askGemini(message, userId) {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-    const chat = model.startChat({ history: history.map(msg => ({ role: msg.role, parts: [{ text: msg.content }] })) });
-    const result = await chat.sendMessage(history[history.length - 1].content);
-    const response = await result.response;
-    const text = response.text();
+
+    // 把記憶讀進來
+    const memory = readMemory(userId);
+
+    // 自動整理 memory，確保符合 Gemini API 的格式
+    const chatHistory = [];
+    let expectRole = "user"; // 第一個一定是 user
+
+    for (const item of memory) {
+      if (item.role === expectRole) {
+        chatHistory.push({ role: item.role, parts: [{ text: item.text }] });
+        expectRole = (expectRole === "user") ? "model" : "user"; // 輪流
+      }
+    }
+
+    // 再加上這次新講的訊息
+    chatHistory.push({ role: "user", parts: [{ text: message }] });
+
+    // 開始送出
+    const chat = model.startChat({ history: chatHistory });
+    const result = await chat.sendMessage(message);
+    const text = result.response.text();
+
+    // 把這次對話存回記憶
+    memory.push({ role: "user", text: message });
+    memory.push({ role: "model", text: text });
+    saveMemory(userId, memory);
+
     return text;
   } catch (error) {
     console.error(error);
-    return "抱歉，我現在無法回應喔！";
+    return "抱歉，我現在無法回應。";
   }
 }
 
